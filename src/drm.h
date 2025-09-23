@@ -1,5 +1,5 @@
 /*
- * drm.h offers a list of methods to use linux DRM and perform modeset to display video frames and the OSD. 
+ * drm.h offers a list of methods to use linux DRM and perform modeset to display video frames and the OSD.
  * It uses two different planes for the OSD and the video feed.
  * The OSD is drawn using lib cairo.
  */
@@ -105,7 +105,7 @@ void modeset_output_destroy(int fd, struct modeset_output *out);
 
 struct modeset_output *modeset_output_create(int fd, drmModeRes *res, drmModeConnector *conn, uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh, uint32_t video_plane_id, uint32_t osd_plane_id);
 
-struct modeset_output *modeset_prepare(int fd, uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh, uint32_t video_plane_id, uint32_t osd_plane_id);
+int modeset_prepare(int fd, uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh, uint32_t video_plane_id, uint32_t osd_plane_id, struct modeset_output ***output_list);
 
 void *modeset_print_modes(int fd);
 
@@ -115,6 +115,6 @@ int modeset_atomic_prepare_commit(int fd, struct modeset_output *out, drmModeAto
 
 void restore_planes_zpos(int fd, struct modeset_output *output_list);
 
-void modeset_cleanup(int fd, struct modeset_output *output_list);
+void modeset_cleanup(int fd, struct modeset_output **output_list, int output_count);
 
 #endif

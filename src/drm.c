@@ -434,7 +434,7 @@ void modeset_output_destroy(int fd, struct modeset_output *out)
 {
 	modeset_destroy_objects(fd, out);
 
-	for (int i=0; i<OSD_BUF_COUNT; i++) { 
+	for (int i=0; i<OSD_BUF_COUNT; i++) {
 		modeset_destroy_fb(fd, &out->osd_bufs[i]);
 	}
 	drmModeDestroyPropertyBlob(fd, out->mode_blob_id);
@@ -587,18 +587,19 @@ void *modeset_print_modes(int fd)
 
 }
 
-struct modeset_output *modeset_prepare(int fd, uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh, uint32_t video_plane_id, uint32_t osd_plane_id)
+int modeset_prepare(int fd, uint16_t mode_width, uint16_t mode_height, uint32_t mode_vrefresh, uint32_t video_plane_id, uint32_t osd_plane_id, struct modeset_output ***output_list)
 {
 	drmModeRes *res;
 	drmModeConnector *conn;
 	unsigned int i;
 	struct modeset_output *out;
+	int output_count = 0;
 
 	res = drmModeGetResources(fd);
 	if (!res) {
 		fprintf(stderr, "cannot retrieve DRM resources (%d): %m\n",
 			errno);
-		return NULL;
+		return output_count;
 	}
 
 	for (i = 0; i < res->count_connectors; ++i) {
@@ -612,13 +613,23 @@ struct modeset_output *modeset_prepare(int fd, uint16_t mode_width, uint16_t mod
 		out = modeset_output_create(fd, res, conn, mode_width, mode_height, mode_vrefresh, video_plane_id, osd_plane_id);
 		drmModeFreeConnector(conn);
 		if (out) {
-			drmModeFreeResources(res);
-			return out;
+			if (output_count == 0) {
+				*output_list = NULL;
+			}
+			*output_list = realloc(*output_list, sizeof(*out) * (output_count + 1));
+			(*output_list)[output_count++] = out;
 		}
 	}
-	fprintf(stderr, "couldn't create any outputs\n");
+
+	if (output_count == 0) {
+		fprintf(stderr, "couldn't create any outputs\n");
+	} else {
+		fprintf(stdout, "%d display(s) initialized\n", output_count);
+	}
+
 	drmModeFreeResources(res);
-	return NULL;
+
+	return output_count;
 }
 
 int modeset_perform_modeset(int fd, struct modeset_output *out, drmModeAtomicReq * req, struct drm_object *plane, int fb_id, uint32_t width, uint32_t height, int zpos)
@@ -649,7 +660,7 @@ int modeset_perform_modeset(int fd, struct modeset_output *out, drmModeAtomicReq
 }
 
 
-int modeset_atomic_prepare_commit(int fd, struct modeset_output *out, drmModeAtomicReq *req, struct drm_object *plane, 
+int modeset_atomic_prepare_commit(int fd, struct modeset_output *out, drmModeAtomicReq *req, struct drm_object *plane,
 	int fb_id, uint32_t width, uint32_t height, int zpos)
 {
 	if (set_drm_object_property(req, &out->connector, "CRTC_ID", out->crtc.id) < 0)
@@ -710,7 +721,7 @@ void restore_planes_zpos(int fd, struct modeset_output *output_list) {
 		return;
 	}
 	ret = drmModeAtomicCommit(fd, output_list->osd_request, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
-	if (ret < 0) 
+	if (ret < 0)
 		fprintf(stderr, "modeset atomic commit failed for plane %d, %m\n", output_list->osd_plane.id);
 
 	zpos = get_property_value(fd, output_list->video_plane.props, "zpos");
@@ -720,11 +731,14 @@ void restore_planes_zpos(int fd, struct modeset_output *output_list) {
 		return;
 	}
 	ret = drmModeAtomicCommit(fd, output_list->video_request, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
-	if (ret < 0) 
+	if (ret < 0)
 		fprintf(stderr, "modeset atomic commit failed for plane %d, %m\n", output_list->video_plane.id);
 }
 
-void modeset_cleanup(int fd, struct modeset_output *output_list)
+void modeset_cleanup(int fd, struct modeset_output **output_list, int output_count)
 {
-	modeset_output_destroy(fd, output_list);
+	for (int i = 0; i < output_count; i++) {
+		modeset_output_destroy(fd, output_list[i]);
+	}
+	free(output_list);
 }

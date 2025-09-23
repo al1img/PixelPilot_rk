@@ -68,7 +68,7 @@ YAML::Node config;
 struct {
 	MppCtx		  ctx;
 	MppApi		  *mpi;
-	
+
 	struct timespec first_frame_ts;
 
 	MppBufferGroup	frm_grp;
@@ -81,7 +81,8 @@ struct {
 
 struct timespec frame_stats[1000];
 
-struct modeset_output *output_list;
+struct modeset_output **output_list = NULL;
+int output_count = 0;
 int frm_eos = 0;
 int drm_fd = 0;
 pthread_mutex_t video_mutex;
@@ -89,6 +90,7 @@ pthread_cond_t video_cond;
 extern bool osd_update_ready;
 extern bool gsmenu_enabled;
 int video_zpos = 1;
+int osd_zpos = 4;
 
 bool mavlink_dvr_on_arm = false;
 bool osd_custom_message = false;
@@ -106,27 +108,31 @@ uint32_t video_plane_id_override = 0;
 uint32_t osd_plane_id_override = 0;
 
 void init_buffer(MppFrame frame) {
-	output_list->video_frm_width = mpp_frame_get_width(frame);
-	output_list->video_frm_height = mpp_frame_get_height(frame);
+	uint32_t frm_width = mpp_frame_get_width(frame);
+	uint32_t frm_height = mpp_frame_get_height(frame);
+
+	for (int i = 0; i < output_count; i++) {
+		output_list[i]->video_frm_width = frm_width;
+		output_list[i]->video_frm_height = frm_height;
+		output_list[i]->video_fb_x = 0;
+		output_list[i]->video_fb_y = 0;
+		output_list[i]->video_fb_width = output_list[i]->mode.hdisplay;
+		output_list[i]->video_fb_height = output_list[i]->mode.vdisplay;
+	}
+
 	RK_U32 hor_stride = mpp_frame_get_hor_stride(frame);
 	RK_U32 ver_stride = mpp_frame_get_ver_stride(frame);
 	MppFrameFormat fmt = mpp_frame_get_fmt(frame);
 	assert((fmt == MPP_FMT_YUV420SP) || (fmt == MPP_FMT_YUV420SP_10BIT));
 
-	spdlog::info("Frame info changed {}({})x{}({})",
-				 output_list->video_frm_width, hor_stride, output_list->video_frm_height, ver_stride);
+	spdlog::info("Frame info changed {}({})x{}({})", frm_width, hor_stride, frm_height, ver_stride);
 
-	output_list->video_fb_x = 0;
-	output_list->video_fb_y = 0;
-	output_list->video_fb_width = output_list->mode.hdisplay;
-	output_list->video_fb_height =output_list->mode.vdisplay;	
-
-	osd_publish_uint_fact("video.width", NULL, 0, output_list->video_frm_width);
-	osd_publish_uint_fact("video.height", NULL, 0, output_list->video_frm_height);
+	osd_publish_uint_fact("video.width", NULL, 0, frm_width);
+	osd_publish_uint_fact("video.height", NULL, 0, frm_height);
 
 	if (mpi.frm_grp) {
 		spdlog::debug("Freeing current mpp_buffer_group");
-		
+
 		// First clean up all DRM resources for existing frames
 		for (int i = 0; i < MAX_FRAMES; i++) {
 			if (mpi.frame_to_drm[i].fb_id) {
@@ -145,7 +151,7 @@ void init_buffer(MppFrame frame) {
 				mpi.frame_to_drm[i].handle = 0;
 			}
 		}
-		
+
 		mpp_buffer_group_clear(mpi.frm_grp);
 		mpp_buffer_group_put(mpi.frm_grp);  // This is important to release the group
 		mpi.frm_grp = NULL;
@@ -153,10 +159,9 @@ void init_buffer(MppFrame frame) {
 
 	// create new external frame group and allocate (commit flow) new DRM buffers and DRM FB
 	int ret = mpp_buffer_group_get_external(&mpi.frm_grp, MPP_BUFFER_TYPE_DRM);
-	assert(!ret);			
+	assert(!ret);
 
 	for (int i=0; i<MAX_FRAMES; i++) {
-		
 		// new DRM buffer
 		struct drm_mode_create_dumb dmcd;
 		memset(&dmcd, 0, sizeof(dmcd));
@@ -170,7 +175,7 @@ void init_buffer(MppFrame frame) {
 		// assert(dmcd.pitch==(fmt==MPP_FMT_YUV420SP?hor_stride:hor_stride*10/8));
 		// assert(dmcd.size==(fmt == MPP_FMT_YUV420SP?hor_stride:hor_stride*10/8)*ver_stride*2);
 		mpi.frame_to_drm[i].handle = dmcd.handle;
-		
+
 		// commit DRM buffer to frame group
 		struct drm_prime_handle dph;
 		memset(&dph, 0, sizeof(struct drm_prime_handle));
@@ -187,7 +192,7 @@ void init_buffer(MppFrame frame) {
 		info.fd = dph.fd;
 		ret = mpp_buffer_commit(mpi.frm_grp, &info);
 		assert(!ret);
-		mpi.frame_to_drm[i].prime_fd = info.fd; // dups fd						
+		mpi.frame_to_drm[i].prime_fd = info.fd; // dups fd
 		if (dph.fd != info.fd) {
 			ret = close(dph.fd);
 			assert(!ret);
@@ -200,11 +205,11 @@ void init_buffer(MppFrame frame) {
 		memset(offsets, 0, sizeof(offsets));
 		handles[0] = mpi.frame_to_drm[i].handle;
 		offsets[0] = 0;
-		pitches[0] = hor_stride;						
+		pitches[0] = hor_stride;
 		handles[1] = mpi.frame_to_drm[i].handle;
 		offsets[1] = pitches[0] * ver_stride;
 		pitches[1] = pitches[0];
-		ret = drmModeAddFB2(drm_fd, output_list->video_frm_width, output_list->video_frm_height, DRM_FORMAT_NV12, handles, pitches, offsets, &mpi.frame_to_drm[i].fb_id, 0);
+		ret = drmModeAddFB2(drm_fd, frm_width, frm_height, DRM_FORMAT_NV12, handles, pitches, offsets, &mpi.frame_to_drm[i].fb_id, 0);
 		assert(!ret);
 	}
 
@@ -212,12 +217,14 @@ void init_buffer(MppFrame frame) {
 	ret = mpi.mpi->control(mpi.ctx, MPP_DEC_SET_EXT_BUF_GROUP, mpi.frm_grp);
 	ret = mpi.mpi->control(mpi.ctx, MPP_DEC_SET_INFO_CHANGE_READY, NULL);
 
-	ret = modeset_perform_modeset(drm_fd, output_list, output_list->video_request, &output_list->video_plane, mpi.frame_to_drm[0].fb_id, output_list->video_frm_width, output_list->video_frm_height, video_zpos);
-	assert(ret >= 0);
+	for (int i = 0; i < output_count; i++) {
+		ret = modeset_perform_modeset(drm_fd, output_list[i], output_list[i]->video_request, &output_list[i]->video_plane,  mpi.frame_to_drm[0].fb_id, frm_width, frm_height, video_zpos);
+		assert(ret >= 0);
+	}
 
 	// dvr setup
 	if (dvr != NULL){
-		dvr->set_video_params(output_list->video_frm_width, output_list->video_frm_height, codec);
+		dvr->set_video_params(frm_width, frm_height, codec);
 	}
 }
 
@@ -236,7 +243,7 @@ void *__FRAME_THREAD__(void *param)
 
 	while (!frm_eos) {
 		struct timespec ts, ats;
-		
+
 		assert(!frame);
 		ret = mpi.mpi->decode_get_frame(mpi.ctx, &frame);
 		assert(!ret);
@@ -252,9 +259,14 @@ void *__FRAME_THREAD__(void *param)
 					mpi.first_frame_ts = ats;
 				}
 
-				MppBuffer buffer = mpp_frame_get_buffer(frame);					
+				MppBuffer buffer = mpp_frame_get_buffer(frame);
 				if (buffer) {
-					output_list->video_poc = mpp_frame_get_poc(frame);
+					int video_poc = mpp_frame_get_poc(frame);
+
+					for (int j = 0; j < output_count; j++) {
+						output_list[j]->video_poc = video_poc;
+					}
+
 					uint64_t feed_data_ts =  mpp_frame_get_pts(frame);
 
 					MppBufferInfo info;
@@ -266,21 +278,25 @@ void *__FRAME_THREAD__(void *param)
 					assert(i!=MAX_FRAMES);
 
 					ts = ats;
-					
+
 					// send DRM FB to display thread
 					ret = pthread_mutex_lock(&video_mutex);
 					assert(!ret);
-					output_list->video_fb_id = mpi.frame_to_drm[i].fb_id;
-                    //output_list->video_fb_index=i;
-                    output_list->decoding_pts=feed_data_ts;
+
+					for (int j = 0; j < output_count; j++) {
+						output_list[j]->video_fb_id = mpi.frame_to_drm[i].fb_id;
+						//output_list[j]->video_fb_index=i;
+						output_list[j]->decoding_pts=feed_data_ts;
+					}
+
 					ret = pthread_cond_signal(&video_cond);
 					assert(!ret);
 					ret = pthread_mutex_unlock(&video_mutex);
 					assert(!ret);
-					
+
 				}
 			}
-			
+
 			frm_eos = mpp_frame_get_eos(frame);
 			mpp_frame_deinit(&frame);
 			frame = NULL;
@@ -293,59 +309,64 @@ void *__FRAME_THREAD__(void *param)
 
 void *__DISPLAY_THREAD__(void *param)
 {
-	int ret;	
+	int ret;
 	pthread_setname_np(pthread_self(), "__DISPLAY");
 
 	while (!frm_eos) {
 		int fb_id;
 		bool osd_update;
-		
+
 		ret = pthread_mutex_lock(&video_mutex);
 		assert(!ret);
-		while (output_list->video_fb_id==0 && !osd_update_ready) {
+		while (output_list[0]->video_fb_id==0 && !osd_update_ready) {
 			pthread_cond_wait(&video_cond, &video_mutex);
 			assert(!ret);
-			if (output_list->video_fb_id == 0 && frm_eos) {
+			if (output_list[0]->video_fb_id == 0 && frm_eos) {
 				ret = pthread_mutex_unlock(&video_mutex);
 				assert(!ret);
 				goto end;
 			}
 		}
-		fb_id = output_list->video_fb_id;
+		fb_id = output_list[0]->video_fb_id;
 		osd_update = osd_update_ready;
 
-        uint64_t decoding_pts=fb_id != 0 ? output_list->decoding_pts : get_time_ms();
-		output_list->video_fb_id=0;
+        uint64_t decoding_pts=fb_id != 0 ? output_list[0]->decoding_pts : get_time_ms();
+		output_list[0]->video_fb_id=0;
 		osd_update_ready = false;
+
 		ret = pthread_mutex_unlock(&video_mutex);
 		assert(!ret);
 
-		// create new video_request
-		drmModeAtomicFree(output_list->video_request);
-		output_list->video_request = drmModeAtomicAlloc();
+		for(int i = 0; i < output_count; i++) {
+			// create new video_request
+			drmModeAtomicFree(output_list[i]->video_request);
+			output_list[i]->video_request = drmModeAtomicAlloc();
 
-		// show DRM FB in plane
-		uint32_t flags = DRM_MODE_ATOMIC_NONBLOCK;
-		if (fb_id != 0) {
-			flags = disable_vsync ? DRM_MODE_ATOMIC_NONBLOCK : DRM_MODE_ATOMIC_ALLOW_MODESET;
-			ret = set_drm_object_property(output_list->video_request, &output_list->video_plane, "FB_ID", fb_id);
-			assert(ret>0);
+			// show DRM FB in plane
+			uint32_t flags = DRM_MODE_ATOMIC_NONBLOCK;
+			if (fb_id != 0) {
+				flags = disable_vsync ? DRM_MODE_ATOMIC_NONBLOCK : DRM_MODE_ATOMIC_ALLOW_MODESET;
+				ret = set_drm_object_property(output_list[i]->video_request, &output_list[i]->video_plane, "FB_ID", fb_id);
+				assert(ret>0);
+			}
+
+			if(enable_osd) {
+				ret = pthread_mutex_lock(&osd_mutex);
+				assert(!ret);
+				ret = set_drm_object_property(output_list[i]->video_request, &output_list[i]->osd_plane, "FB_ID", output_list[0]->osd_bufs[output_list[0]->osd_buf_switch].fb);
+				assert(ret>0);
+				ret = pthread_mutex_unlock(&osd_mutex);
+				assert(!ret);
+			}
+
+			drmModeAtomicCommit(drm_fd, output_list[i]->video_request, flags, NULL);
 		}
 
-		if(enable_osd) {
-			ret = pthread_mutex_lock(&osd_mutex);
-			assert(!ret);		
-			ret = set_drm_object_property(output_list->video_request, &output_list->osd_plane, "FB_ID", output_list->osd_bufs[output_list->osd_buf_switch].fb);
-			assert(ret>0);
-		}
-		drmModeAtomicCommit(drm_fd, output_list->video_request, flags, NULL);
-		ret = pthread_mutex_unlock(&osd_mutex);
-		assert(!ret);
 		osd_publish_uint_fact("video.displayed_frame", NULL, 0, 1);
 		uint64_t decode_and_handover_display_ms=get_time_ms()-decoding_pts;
 		osd_publish_uint_fact("video.decode_and_handover_ms", NULL, 0, decode_and_handover_display_ms);
 	}
-end:	
+end:
 	spdlog::info("Display thread done.");
 	return nullptr;
 }
@@ -429,11 +450,11 @@ void switch_pipeline_source(const char * source_type, const char * source_path) 
     }
 }
 
-void fast_forward(double rate){ 
+void fast_forward(double rate){
         receiver->fast_forward();
 }
 
-void fast_rewind(double rate){ 
+void fast_rewind(double rate){
         receiver->fast_rewind();
 }
 
@@ -441,7 +462,7 @@ void skip_duration(int64_t skip_ms){
         receiver->skip_duration(skip_ms);
 }
 
-void normal_playback() { 
+void normal_playback() {
         receiver->normal_playback();
 }
 
@@ -460,7 +481,7 @@ void read_gstreamerpipe_stream(MppPacket *packet, int gst_udp_port, const char *
 	} else {
 		receiver = std::make_unique<GstRtpReceiver>(gst_udp_port, codec);
 	}
-	long long bytes_received = 0; 
+	long long bytes_received = 0;
 	uint64_t period_start=0;
     auto cb=[&packet,/*&decoder_stalled_count,*/ &bytes_received, &period_start](std::shared_ptr<std::vector<uint8_t>> frame){
         // Let the gst pull thread run at quite high priority
@@ -603,7 +624,7 @@ void printHelp() {
 
 int main(int argc, char **argv)
 {
-	int ret;	
+	int ret;
 	int i, j;
 	int mavlink_thread = 0;
 	int dvr_autostart = 0;
@@ -617,7 +638,7 @@ int main(int argc, char **argv)
 	uint32_t mode_vrefresh = 0;
 	std::string osd_config_path;
 	auto log_level = spdlog::level::info;
-	
+
     std::string pidFilePath = "/run/pixelpilot.pid";
     std::ofstream pidFile(pidFilePath);
     pidFile << getpid();
@@ -656,13 +677,13 @@ int main(int argc, char **argv)
 	}
 
 	// Load console arguments
-	__BeginParseConsoleArguments__(printHelp) 
+	__BeginParseConsoleArguments__(printHelp)
 
 	__OnArgument("-p") {
 		listen_port = atoi(__ArgValue);
 		continue;
 	}
-	
+
 	__OnArgument("--socket") {
 		unix_socket = const_cast<char*>(__ArgValue);
 		continue;
@@ -672,7 +693,7 @@ int main(int argc, char **argv)
 		// Already handled above, just skip
 		const char* dummy = __ArgValue;  // Skip the filename
 		continue;
-	}	
+	}
 
 	__OnArgument("--codec") {
 		char * codec_str = const_cast<char*>(__ArgValue);
@@ -828,14 +849,14 @@ int main(int argc, char **argv)
 	if (enable_osd == 0 ) {
 		video_zpos = 4;
 	}
-	
+
 	MppCodingType mpp_type = MPP_VIDEO_CodingHEVC;
 	if(codec==VideoCodec::H264) {
 		mpp_type = MPP_VIDEO_CodingAVC;
 	}
 	ret = mpp_check_support_format(MPP_CTX_DEC, mpp_type);
 	assert(!ret);
-	
+
 	//////////////////////////////////  DRM SETUP
 	ret = modeset_open(&drm_fd, "/dev/dri/card0");
 	if (ret < 0) {
@@ -848,13 +869,13 @@ int main(int argc, char **argv)
 		return 0;
 	}
 
-	output_list = modeset_prepare(drm_fd, mode_width, mode_height, mode_vrefresh, video_plane_id_override, osd_plane_id_override);
-	if (!output_list) {
+	output_count = modeset_prepare(drm_fd, mode_width, mode_height, mode_vrefresh, video_plane_id_override, osd_plane_id_override, &output_list);
+	if (!output_count) {
 		fprintf(stderr,
 				"cannot initialize display. Is display connected? Is --screen-mode correct?\n");
 		return -2;
 	}
-	
+
 	////////////////////////////////// MPI SETUP
 	MppPacket packet;
 
@@ -885,7 +906,7 @@ int main(int argc, char **argv)
 	}
 	signal(SIGUSR2, sigusr2_handler);
  	//////////////////// THREADS SETUP
-	
+
 	ret = pthread_mutex_init(&video_mutex, NULL);
 	assert(!ret);
 	ret = pthread_cond_init(&video_cond, NULL);
@@ -898,8 +919,8 @@ int main(int argc, char **argv)
 		args.mp4_fragmentation_mode = mp4_fragmentation_mode;
 		args.dvr_filenames_with_sequence = dvr_filenames_with_sequence;
 		args.video_framerate = video_framerate;
-		args.video_p.video_frm_width = output_list->video_frm_width;
-		args.video_p.video_frm_height = output_list->video_frm_height;
+		args.video_p.video_frm_width = output_list[0]->video_frm_width;
+		args.video_p.video_frm_height = output_list[0]->video_frm_height;
 		args.video_p.codec = codec;
 		dvr = new Dvr(args);
 		ret = pthread_create(&tid_dvr, NULL, &Dvr::__THREAD__, dvr);
@@ -930,9 +951,15 @@ int main(int argc, char **argv)
 			assert(!ret);
 		}
 
+		struct modeset_buf *buf = &output_list[0]->osd_bufs[output_list[0]->osd_buf_switch];
+		for (int i = 0; i < output_count; i++) {
+			ret = modeset_perform_modeset(drm_fd, output_list[i], output_list[i]->osd_request, &output_list[i]->osd_plane, buf->fb, buf->width, buf->height, osd_zpos);
+			assert(!ret);
+		}
+
 		osd_thread_params *args = (osd_thread_params *)malloc(sizeof *args);
         args->fd = drm_fd;
-        args->out = output_list;
+        args->out = output_list[0];
 		args->config = osd_config;
 		ret = pthread_create(&tid_osd, NULL, __OSD_THREAD__, args);
 		assert(!ret);
@@ -945,17 +972,17 @@ int main(int argc, char **argv)
 
 	ret = pthread_join(tid_frame, NULL);
 	assert(!ret);
-	
+
 	ret = pthread_mutex_lock(&video_mutex);
-	assert(!ret);	
+	assert(!ret);
 	ret = pthread_cond_signal(&video_cond);
-	assert(!ret);	
+	assert(!ret);
 	ret = pthread_mutex_unlock(&video_mutex);
-	assert(!ret);	
+	assert(!ret);
 
 	ret = pthread_join(tid_display, NULL);
-	assert(!ret);	
-	
+	assert(!ret);
+
 	ret = pthread_cond_destroy(&video_cond);
 	assert(!ret);
 	ret = pthread_mutex_destroy(&video_mutex);
@@ -995,25 +1022,28 @@ int main(int argc, char **argv)
 			assert(!ret);
 		}
 	}
-		
+
 	mpp_packet_deinit(&packet);
 	mpp_destroy(mpi.ctx);
 	free(nal_buffer);
-	
+
 	////////////////////////////////////////////// DRM CLEANUP
-	restore_planes_zpos(drm_fd, output_list);
-	drmModeSetCrtc(drm_fd,
-			       output_list->saved_crtc->crtc_id,
-			       output_list->saved_crtc->buffer_id,
-			       output_list->saved_crtc->x,
-			       output_list->saved_crtc->y,
-			       &output_list->connector.id,
-			       1,
-			       &output_list->saved_crtc->mode);
-	drmModeFreeCrtc(output_list->saved_crtc);
-	drmModeAtomicFree(output_list->video_request);
-	drmModeAtomicFree(output_list->osd_request);
-	modeset_cleanup(drm_fd, output_list);
+	for (int i = 0; i < output_count; i++) {
+		restore_planes_zpos(drm_fd, output_list[i]);
+		drmModeSetCrtc(drm_fd,
+					output_list[i]->saved_crtc->crtc_id,
+					output_list[i]->saved_crtc->buffer_id,
+					output_list[i]->saved_crtc->x,
+					output_list[i]->saved_crtc->y,
+					&output_list[i]->connector.id,
+					1,
+					&output_list[i]->saved_crtc->mode);
+		drmModeFreeCrtc(output_list[i]->saved_crtc);
+		drmModeAtomicFree(output_list[i]->video_request);
+		drmModeAtomicFree(output_list[i]->osd_request);
+	}
+
+	modeset_cleanup(drm_fd, output_list, output_count);
 	close(drm_fd);
 
     remove(pidFilePath.c_str());

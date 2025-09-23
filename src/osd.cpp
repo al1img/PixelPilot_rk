@@ -38,7 +38,6 @@ extern "C" {
 using json = nlohmann::json;
 
 int enable_osd = 0;
-int osd_zpos = 2;
 extern uint32_t refresh_frequency_ms;
 extern uint32_t frames_received;
 uint32_t stats_rx_bytes = 0;
@@ -197,7 +196,7 @@ public:
 		}
 		return "(unknown)";
 	}
-	
+
 private:
 	Type type = T_UNDEF;
 	std::string typeName(Type t) {
@@ -1014,7 +1013,7 @@ public:
 
 	virtual void draw(cairo_t *cr) {
 
-		if (! shm_surface) 
+		if (! shm_surface)
 			init_shm(cr);
 		auto [x, y] = xy(cr);
 		cairo_set_source_surface(cr, shm_surface, x, y); // Position at (0, 0)
@@ -1082,7 +1081,7 @@ private:
         if (!fact.isDefined()) return nullptr;
 
         long value = 0;
-        
+
         // Convert all fact types to comparable integer values
         switch (fact.getType()) {
             case Fact::T_BOOL:
@@ -1419,7 +1418,7 @@ typedef struct png_closure
 cairo_status_t on_read_png_stream(png_closure_t * closure, unsigned char * data, unsigned int length)
 {
 	if(length > closure->bytes_left) return CAIRO_STATUS_READ_ERROR;
-	
+
 	memcpy(data, closure->iter, length);
 	closure->iter += length;
 	closure->bytes_left -= length;
@@ -1444,7 +1443,7 @@ void my_flush_cb(lv_display_t * display, const lv_area_t * area, uint8_t * px_ma
     struct modeset_buf *buf1 = &p->out->osd_bufs[0];
     struct modeset_buf *buf2 = &p->out->osd_bufs[1];
 	int ret = pthread_mutex_lock(&osd_mutex);
-	assert(!ret);	
+	assert(!ret);
     if (px_map == buf1->map) {
 		p->out->osd_buf_switch = 0;
     } else if (px_map == buf2->map) {
@@ -1499,7 +1498,7 @@ void setup_lvgl(osd_thread_params *p) {
 	lv_display_set_color_format(display, LV_COLOR_FORMAT_ARGB8888);
     lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(lv_layer_bottom(), LV_OPA_TRANSP, LV_PART_MAIN);
-    
+
 }
 
 void *__OSD_THREAD__(void *param) {
@@ -1512,10 +1511,6 @@ void *__OSD_THREAD__(void *param) {
 
 	int ret = pthread_mutex_init(&osd_mutex, NULL);
 	assert(!ret);
-
-	struct modeset_buf *buf = &p->out->osd_bufs[p->out->osd_buf_switch];
-	ret = modeset_perform_modeset(p->fd, p->out, p->out->osd_request, &p->out->osd_plane,
-								  buf->fb, buf->width, buf->height, osd_zpos);
 
 	if (gsmenu_enabled) {
 		setup_lvgl(p);
@@ -1562,7 +1557,7 @@ void *__OSD_THREAD__(void *param) {
 				modeset_paint_buffer(buf, osd);
 
 				int ret = pthread_mutex_lock(&osd_mutex);
-				assert(!ret);	
+				assert(!ret);
 				p->out->osd_buf_switch = buf_idx;
 				ret = pthread_mutex_unlock(&osd_mutex);
 				assert(!ret);
