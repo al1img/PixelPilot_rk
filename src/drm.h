@@ -24,8 +24,6 @@
 #include <rockchip/rk_mpi.h>
 #include <assert.h>
 
-#define OSD_BUF_COUNT	2
-
 struct drm_object {
 	drmModeObjectProperties *props;
 	drmModePropertyRes **props_info;
@@ -55,8 +53,6 @@ struct modeset_output {
 
 	// OSD variables
 	drmModeAtomicReq *osd_request;
-	unsigned int osd_buf_switch;
-	struct modeset_buf osd_bufs[OSD_BUF_COUNT];
 	struct drm_object osd_plane;
 
 	// Video variables
@@ -74,6 +70,13 @@ struct modeset_output {
 	bool cleanup;
 };
 
+
+#define MODESET_BUF_COUNT	2
+
+typedef struct {
+	unsigned int buf_switch;
+	struct modeset_buf bufs[MODESET_BUF_COUNT];
+} modeset_bufs;
 
 int modeset_open(int *out, const char *node);
 
@@ -113,7 +116,7 @@ int modeset_perform_modeset(int fd, struct modeset_output *out, drmModeAtomicReq
 
 int modeset_atomic_prepare_commit(int fd, struct modeset_output *out, drmModeAtomicReq *req, struct drm_object *plane, int fb_id, uint32_t width, uint32_t height, int zpos);
 
-void restore_planes_zpos(int fd, struct modeset_output *output_list);
+void restore_planes_zpos(int fd, struct modeset_output *output_list, struct modeset_buf *buf);
 
 void modeset_cleanup(int fd, struct modeset_output **output_list, int output_count);
 

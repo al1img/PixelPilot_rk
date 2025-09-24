@@ -103,6 +103,8 @@ const char* unix_socket = NULL;
 char* dvr_template = NULL;
 Dvr *dvr = NULL;
 
+modeset_bufs osd_bufs;
+
 // Add global variables for plane id overrides
 uint32_t video_plane_id_override = 0;
 uint32_t osd_plane_id_override = 0;
@@ -314,7 +316,6 @@ void *__DISPLAY_THREAD__(void *param)
 
 	while (!frm_eos) {
 		int fb_id;
-		bool osd_update;
 
 		ret = pthread_mutex_lock(&video_mutex);
 		assert(!ret);
@@ -328,9 +329,8 @@ void *__DISPLAY_THREAD__(void *param)
 			}
 		}
 		fb_id = output_list[0]->video_fb_id;
-		osd_update = osd_update_ready;
 
-        uint64_t decoding_pts=fb_id != 0 ? output_list[0]->decoding_pts : get_time_ms();
+		uint64_t decoding_pts=fb_id != 0 ? output_list[0]->decoding_pts : get_time_ms();
 		output_list[0]->video_fb_id=0;
 		osd_update_ready = false;
 
@@ -353,7 +353,7 @@ void *__DISPLAY_THREAD__(void *param)
 			if(enable_osd) {
 				ret = pthread_mutex_lock(&osd_mutex);
 				assert(!ret);
-				ret = set_drm_object_property(output_list[i]->video_request, &output_list[i]->osd_plane, "FB_ID", output_list[0]->osd_bufs[output_list[0]->osd_buf_switch].fb);
+				ret = set_drm_object_property(output_list[i]->video_request, &output_list[i]->osd_plane, "FB_ID", osd_bufs.bufs[osd_bufs.buf_switch].fb);
 				assert(ret>0);
 				ret = pthread_mutex_unlock(&osd_mutex);
 				assert(!ret);
@@ -876,6 +876,15 @@ int main(int argc, char **argv)
 		return -2;
 	}
 
+	if (enable_osd) {
+		for (int i=0; i<MODESET_BUF_COUNT; i++) {
+			osd_bufs.bufs[i].width = output_list[0]->mode.hdisplay;
+			osd_bufs.bufs[i].height = output_list[0]->mode.vdisplay;
+			int ret = modeset_create_fb(drm_fd, &osd_bufs.bufs[i]);
+			assert(!ret);
+		}
+	}
+
 	////////////////////////////////// MPI SETUP
 	MppPacket packet;
 
@@ -951,15 +960,15 @@ int main(int argc, char **argv)
 			assert(!ret);
 		}
 
-		struct modeset_buf *buf = &output_list[0]->osd_bufs[output_list[0]->osd_buf_switch];
+		struct modeset_buf *buf = &osd_bufs.bufs[osd_bufs.buf_switch];
 		for (int i = 0; i < output_count; i++) {
 			ret = modeset_perform_modeset(drm_fd, output_list[i], output_list[i]->osd_request, &output_list[i]->osd_plane, buf->fb, buf->width, buf->height, osd_zpos);
 			assert(!ret);
 		}
 
 		osd_thread_params *args = (osd_thread_params *)malloc(sizeof *args);
-        args->fd = drm_fd;
-        args->out = output_list[0];
+		args->fd = drm_fd;
+		args->osd_bufs = &osd_bufs;
 		args->config = osd_config;
 		ret = pthread_create(&tid_osd, NULL, __OSD_THREAD__, args);
 		assert(!ret);
@@ -993,8 +1002,10 @@ int main(int argc, char **argv)
 		assert(!ret);
 	}
 	if (enable_osd) {
-		ret = pthread_join(tid_wfbcli, NULL);
-		assert(!ret);
+		if (wfb_port) {
+			ret = pthread_join(tid_wfbcli, NULL);
+			assert(!ret);
+		}
 		ret = pthread_join(tid_osd, NULL);
 		assert(!ret);
 	}
@@ -1029,7 +1040,7 @@ int main(int argc, char **argv)
 
 	////////////////////////////////////////////// DRM CLEANUP
 	for (int i = 0; i < output_count; i++) {
-		restore_planes_zpos(drm_fd, output_list[i]);
+		restore_planes_zpos(drm_fd, output_list[i], &osd_bufs.bufs[0]);
 		drmModeSetCrtc(drm_fd,
 					output_list[i]->saved_crtc->crtc_id,
 					output_list[i]->saved_crtc->buffer_id,
@@ -1044,6 +1055,13 @@ int main(int argc, char **argv)
 	}
 
 	modeset_cleanup(drm_fd, output_list, output_count);
+
+	if (enable_osd) {
+		for (int i = 0; i < MODESET_BUF_COUNT; i++) {
+			modeset_destroy_fb(drm_fd, &osd_bufs.bufs[i]);
+		}
+	}
+
 	close(drm_fd);
 
     remove(pidFilePath.c_str());

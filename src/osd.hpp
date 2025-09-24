@@ -2,12 +2,12 @@
 #define OSDPP_H
 
 extern "C" {
-#include "drm.h"
+#include "osd.h"
 }
 #include <nlohmann/json.hpp>
 
 typedef struct {
-	struct modeset_output *out;
+	modeset_bufs *osd_bufs;
 	int fd;
 	nlohmann::json config;
 } osd_thread_params;

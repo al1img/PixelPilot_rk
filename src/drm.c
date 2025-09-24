@@ -416,27 +416,14 @@ void modeset_destroy_fb(int fd, struct modeset_buf *buf)
 
 int modeset_setup_framebuffers(int fd, drmModeConnector *conn, struct modeset_output *out)
 {
-	for (int i=0; i<OSD_BUF_COUNT; i++) {
-		out->osd_bufs[i].width = out->mode.hdisplay;
-		out->osd_bufs[i].height = out->mode.vdisplay;
-		int ret = modeset_create_fb(fd, &out->osd_bufs[i]);
-		if (ret) {
-			return ret;
-		}
-	}
 	out->video_crtc_width = out->mode.hdisplay;
 	out->video_crtc_height = out->mode.vdisplay;
 	return 0;
 }
 
-
 void modeset_output_destroy(int fd, struct modeset_output *out)
 {
 	modeset_destroy_objects(fd, out);
-
-	for (int i=0; i<OSD_BUF_COUNT; i++) {
-		modeset_destroy_fb(fd, &out->osd_bufs[i]);
-	}
 	drmModeDestroyPropertyBlob(fd, out->mode_blob_id);
 	free(out);
 }
@@ -622,7 +609,7 @@ int modeset_prepare(int fd, uint16_t mode_width, uint16_t mode_height, uint32_t 
 	}
 
 	if (output_count == 0) {
-		fprintf(stderr, "couldn't create any outputs\n");
+	fprintf(stderr, "couldn't create any outputs\n");
 	} else {
 		fprintf(stdout, "%d display(s) initialized\n", output_count);
 	}
@@ -708,10 +695,9 @@ int modeset_atomic_prepare_commit(int fd, struct modeset_output *out, drmModeAto
 	return 0;
 }
 
-void restore_planes_zpos(int fd, struct modeset_output *output_list) {
+void restore_planes_zpos(int fd, struct modeset_output *output_list, struct modeset_buf *buf) {
 	// restore osd zpos
 	int ret, flags;
-	struct modeset_buf *buf = &output_list->osd_bufs[0];
 
 	// TODO(geehe) Find a more elegant way to do this.
 	int64_t zpos = get_property_value(fd, output_list->osd_plane.props, "zpos");

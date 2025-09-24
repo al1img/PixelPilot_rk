@@ -1439,15 +1439,14 @@ cairo_surface_t * surface_from_embedded_png(const char * png, size_t length)
 
 void my_flush_cb(lv_display_t * display, const lv_area_t * area, uint8_t * px_map)
 {
-
-    struct modeset_buf *buf1 = &p->out->osd_bufs[0];
-    struct modeset_buf *buf2 = &p->out->osd_bufs[1];
+    struct modeset_buf *buf1 = &p->osd_bufs->bufs[0];
+    struct modeset_buf *buf2 = &p->osd_bufs->bufs[1];
 	int ret = pthread_mutex_lock(&osd_mutex);
 	assert(!ret);
     if (px_map == buf1->map) {
-		p->out->osd_buf_switch = 0;
+		p->osd_bufs->buf_switch = 0;
     } else if (px_map == buf2->map) {
-		p->out->osd_buf_switch = 1;
+		p->osd_bufs->buf_switch = 1;
     } else {
         spdlog::error("Unknown buffer being flushed");
     }
@@ -1481,12 +1480,12 @@ void setup_lvgl(osd_thread_params *p) {
     lv_init();
 
 	// create the display
-    struct modeset_buf *buf = &p->out->osd_bufs[p->out->osd_buf_switch];
+    struct modeset_buf *buf = &p->osd_bufs->bufs[p->osd_bufs->buf_switch];
 	display = lv_display_create(buf->width, buf->height);
 
 	// Get the first two buffers from the OSD buffers
-	struct modeset_buf *buf1 = &p->out->osd_bufs[0];
-	struct modeset_buf *buf2 = &p->out->osd_bufs[1];
+	struct modeset_buf *buf1 = &p->osd_bufs->bufs[0];
+	struct modeset_buf *buf2 = &p->osd_bufs->bufs[1];
 
 	// Set the buffers in LVGL
 	lv_display_set_buffers(display, buf1->map, buf2->map, buf1->size, LV_DISPLAY_RENDER_MODE_DIRECT);
@@ -1552,13 +1551,13 @@ void *__OSD_THREAD__(void *param) {
 
 			if (! menu_active ) {
 				SPDLOG_DEBUG("refresh OSD");
-				int buf_idx = p->out->osd_buf_switch ^ 1;
-				struct modeset_buf *buf = &p->out->osd_bufs[buf_idx];
+				int buf_idx = p->osd_bufs->buf_switch ^ 1;
+				struct modeset_buf *buf = &p->osd_bufs->bufs[buf_idx];
 				modeset_paint_buffer(buf, osd);
 
 				int ret = pthread_mutex_lock(&osd_mutex);
 				assert(!ret);
-				p->out->osd_buf_switch = buf_idx;
+				p->osd_bufs->buf_switch = buf_idx;
 				ret = pthread_mutex_unlock(&osd_mutex);
 				assert(!ret);
 

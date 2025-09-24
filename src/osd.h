@@ -5,6 +5,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include "drm.h"
+
 extern int enable_osd;
 extern bool osd_custom_message;
 extern pthread_mutex_t osd_mutex;
