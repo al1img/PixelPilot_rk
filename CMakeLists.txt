@@ -11,7 +11,7 @@ set(LV_USE_LINUX_DRM ON)
 set(LV_CONF_BUILD_DISABLE_DEMOS 1)
 set(LV_CONF_BUILD_DISABLE_EXAMPLES 1)
 add_subdirectory(lvgl)
-target_include_directories(lvgl PUBLIC 
+target_include_directories(lvgl PUBLIC
     ${PROJECT_SOURCE_DIR}
     /usr/include/libdrm
     /usr/include/drm
@@ -54,7 +54,7 @@ set(SIMULATOR_SOURCES
         src/gsmenu/gs_system.h
         src/gsmenu/gs_system.c
         src/gsmenu/gs_actions.h
-        src/gsmenu/gs_actions.c        
+        src/gsmenu/gs_actions.c
         src/gsmenu/air_wfbng.h
         src/gsmenu/air_wfbng.c
         src/gsmenu/air_alink.h
@@ -73,7 +73,7 @@ set(SIMULATOR_SOURCES
 
 add_compile_options("-Wno-address-of-packed-member")
 
-set(SOURCE_FILES 
+set(SOURCE_FILES
         src/drm.h
         src/drm.c
         src/gsmenu/executor.h
@@ -107,10 +107,10 @@ set(SOURCE_FILES
         src/gsmenu/air_alink.h
         src/gsmenu/air_alink.c
         src/gsmenu/gs_actions.h
-        src/gsmenu/gs_actions.c        
+        src/gsmenu/gs_actions.c
         src/gsmenu/styles.h
         src/gsmenu/styles.c
-        src/gsmenu/ui.c 
+        src/gsmenu/ui.c
         src/lvosd.h
         src/lvosd.c
         src/menu.h
@@ -130,7 +130,9 @@ set(SOURCE_FILES
         src/wfbcli.cpp
         src/scheduling_helper.hpp
         src/gstrtpreceiver.cpp
-        src/gstrtpreceiver.h)
+        src/gstrtpreceiver.h
+        src/bmp/bmp.cpp
+        src/bmp/bmp.h)
 file(GLOB ICONS src/icons/*.png)
 file(GLOB OSD_CONFIGS *_osd.json)
 
@@ -153,7 +155,7 @@ else()
   find_package(yaml-cpp REQUIRED)
   pkg_check_modules(LIBGPIOD REQUIRED libgpiod)
   add_executable(${PROJECT_NAME} ${SOURCE_FILES})
-  target_link_libraries(${PROJECT_NAME} rockchip_mpp pthread drm m cairo spdlog::spdlog nlohmann_json::nlohmann_json yaml-cpp rt lvgl ${LIBGPIOD_LIBRARIES} ${PNG_LIBRARIES})
+  target_link_libraries(${PROJECT_NAME} rockchip_mpp pthread drm m cairo spdlog::spdlog nlohmann_json::nlohmann_json yaml-cpp rt lvgl rga ${LIBGPIOD_LIBRARIES} ${PNG_LIBRARIES})
   # Embed gstreamer
   find_package(PkgConfig REQUIRED)
   pkg_search_module(GST REQUIRED
@@ -162,7 +164,7 @@ else()
   )
   pkg_search_module(gstreamer REQUIRED IMPORTED_TARGET gstreamer-1.0>=1.4)
   pkg_search_module(gstreamer-app REQUIRED IMPORTED_TARGET gstreamer-app-1.0>=1.4)
-  target_link_libraries(${PROJECT_NAME} PkgConfig::gstreamer PkgConfig::gstreamer-app)  
+  target_link_libraries(${PROJECT_NAME} PkgConfig::gstreamer PkgConfig::gstreamer-app)
 endif()
 
 if(CMAKE_BUILD_TYPE MATCHES "Debug")
@@ -191,14 +193,14 @@ install(FILES ${OSD_CONFIGS}
 )
 
 # Install gsmenu.sh to bin directory
-install(FILES 
+install(FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/gsmenu.sh
     DESTINATION ${CMAKE_INSTALL_BINDIR}
     PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
 )
 
 # Install configuration files to /etc
-install(FILES 
+install(FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/pixelpilot.yaml
     ${CMAKE_CURRENT_SOURCE_DIR}/config_osd.json
     DESTINATION /etc

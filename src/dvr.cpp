@@ -187,7 +187,6 @@ end:
 }
 
 int Dvr::start() {
-	char *fname_tpl = filename_template;
 	std::string rec_dir, filename_pattern;
 	fs::path pathObj(filename_template);
 	rec_dir = pathObj.parent_path().string();

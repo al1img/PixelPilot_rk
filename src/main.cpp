@@ -55,6 +55,10 @@ extern "C" {
 #include "pixelpilot_config.h"
 #include <iostream>
 
+#include <im2d.h>
+#include <RgaUtils.h>
+#include "bmp/bmp.h"
+
 
 #define READ_BUF_SIZE (1024*1024) // SZ_1M https://github.com/rockchip-linux/mpp/blob/ed377c99a733e2cdbcc457a6aa3f0fcd438a9dff/osal/inc/mpp_common.h#L179
 #define MAX_FRAMES 24		// min 16 and 20+ recommended (mpp/readme.txt)
@@ -62,6 +66,7 @@ extern "C" {
 #define CODEC_ALIGN(x, a)   (((x)+(a)-1)&~((a)-1))
 
 #define DEFAULT_CONFIG_PATH "/etc/pixelpilot.yaml"
+
 const char * config_file_path;
 YAML::Node config;
 
@@ -79,6 +84,22 @@ struct {
 	} frame_to_drm[MAX_FRAMES];
 } mpi;
 
+#define MAX_ENCODE_BUFS 2
+
+struct {
+	bool enable;
+	bool ready;
+	MppBufferGroup	frm_grp;
+	MppBuffer frm_buf[MAX_ENCODE_BUFS];
+	int frm_idx;
+	MppFrameFormat frm_fmt;
+	uint32_t frm_width;
+	uint32_t frm_height;
+	MppBuffer osd_buf;
+	MppBuffer cur_buf;
+	MppBuffer prev_buf;
+} encode;
+
 struct timespec frame_stats[1000];
 
 struct modeset_output **output_list = NULL;
@@ -87,6 +108,8 @@ int frm_eos = 0;
 int drm_fd = 0;
 pthread_mutex_t video_mutex;
 pthread_cond_t video_cond;
+pthread_mutex_t encode_mutex;
+pthread_cond_t encode_cond;
 extern bool osd_update_ready;
 extern bool gsmenu_enabled;
 int video_zpos = 1;
@@ -133,7 +156,7 @@ void init_buffer(MppFrame frame) {
 	osd_publish_uint_fact("video.height", NULL, 0, frm_height);
 
 	if (mpi.frm_grp) {
-		spdlog::debug("Freeing current mpp_buffer_group");
+		spdlog::debug("Freeing current mpi mpp_buffer_group");
 
 		// First clean up all DRM resources for existing frames
 		for (int i = 0; i < MAX_FRAMES; i++) {
@@ -157,6 +180,35 @@ void init_buffer(MppFrame frame) {
 		mpp_buffer_group_clear(mpi.frm_grp);
 		mpp_buffer_group_put(mpi.frm_grp);  // This is important to release the group
 		mpi.frm_grp = NULL;
+	}
+
+	if (encode.frm_grp) {
+		spdlog::debug("Freeing current encode mpp_buffer_group");
+
+		for (int i = 0; i < MAX_ENCODE_BUFS; i++) {
+			mpp_buffer_put(encode.frm_buf[i]);
+		}
+		mpp_buffer_put(encode.osd_buf);
+		mpp_buffer_group_put(encode.frm_grp);
+		encode.frm_grp = NULL;
+
+		encode.cur_buf = NULL;
+		encode.prev_buf = NULL;
+	}
+
+	if (encode.enable) {
+		int ret = mpp_buffer_group_get_internal(&encode.frm_grp, MPP_BUFFER_TYPE_DRM);
+		assert(!ret);
+		for (int i = 0; i < MAX_ENCODE_BUFS; i++) {
+			ret = mpp_buffer_get(encode.frm_grp, &encode.frm_buf[i], CODEC_ALIGN(hor_stride, 64) * CODEC_ALIGN(ver_stride, 64) * 4);
+			assert(!ret);
+		}
+		ret = mpp_buffer_get(encode.frm_grp, &encode.osd_buf, CODEC_ALIGN(hor_stride, 64) * CODEC_ALIGN(ver_stride, 64) * 4);
+		assert(!ret);
+
+		encode.frm_fmt = fmt;
+		encode.frm_width = frm_width;
+		encode.frm_height = frm_height;
 	}
 
 	// create new external frame group and allocate (commit flow) new DRM buffers and DRM FB
@@ -253,7 +305,19 @@ void *__FRAME_THREAD__(void *param)
 		if (frame) {
 			if (mpp_frame_get_info_change(frame)) {
 				// new resolution
+				ret = pthread_mutex_lock(&video_mutex);
+				assert(!ret);
+
+				ret = pthread_mutex_lock(&encode_mutex);
+				assert(!ret);
+
 				init_buffer(frame);
+
+				ret = pthread_mutex_unlock(&video_mutex);
+				assert(!ret);
+
+				ret = pthread_mutex_unlock(&encode_mutex);
+				assert(!ret);
 			} else {
 				// regular frame received
 				if (!mpi.first_frame_ts.tv_sec) {
@@ -296,6 +360,16 @@ void *__FRAME_THREAD__(void *param)
 					ret = pthread_mutex_unlock(&video_mutex);
 					assert(!ret);
 
+					if (encode.enable) {
+						ret = pthread_mutex_lock(&encode_mutex);
+						assert(!ret);
+
+						encode.prev_buf = encode.cur_buf;
+						encode.cur_buf = buffer;
+
+						ret = pthread_mutex_unlock(&encode_mutex);
+						assert(!ret);
+					}
 				}
 			}
 
@@ -305,7 +379,296 @@ void *__FRAME_THREAD__(void *param)
 		} else assert(0);
 	}
 	spdlog::info("Frame thread done.");
+	ret = pthread_cond_signal(&video_cond);
+	assert(!ret);
+	if (encode.enable) {
+		ret = pthread_cond_signal(&encode_cond);
+		assert(!ret);
+	}
 	return nullptr;
+}
+
+int copy_osd_buf() {
+	MppBufferInfo dst_info;
+	rga_buffer_t src_img, dst_img;
+	rga_buffer_handle_t src_handle, dst_handle;
+
+	int64_t start, end;
+
+	start = get_cur_us();
+
+	int ret = mpp_buffer_info_get(encode.osd_buf, &dst_info);
+	if (ret) {
+		spdlog::error("get dst buf info failed");
+		return ret;
+	}
+
+	uint8_t* src_ptr = osd_bufs.bufs[osd_bufs.buf_switch].map;
+	uint32_t src_size = osd_bufs.bufs[osd_bufs.buf_switch].size;
+	uint32_t src_width = osd_bufs.bufs[osd_bufs.buf_switch].width;
+	uint32_t src_height = osd_bufs.bufs[osd_bufs.buf_switch].height;
+	uint32_t fmt = RK_FORMAT_RGBA_8888;
+
+	src_handle = importbuffer_virtualaddr(src_ptr, src_size);
+	dst_handle = importbuffer_fd(dst_info.fd, dst_info.size);
+
+	if (!src_handle || !dst_handle) {
+		spdlog::error("import buffer failed");
+		ret = -1;
+		goto release_buffers;
+	}
+
+	src_img = wrapbuffer_handle(src_handle, src_width, src_height, fmt);
+	dst_img = wrapbuffer_handle(dst_handle, encode.frm_width, encode.frm_height, fmt);
+
+	ret = imcheck(src_img, dst_img, {}, {});
+	if (IM_STATUS_NOERROR != ret) {
+		spdlog::error("resize check failed");
+		ret = -1;
+		goto release_buffers;
+	}
+
+	ret = imresize(src_img, dst_img);
+	if (ret != IM_STATUS_SUCCESS) {
+		spdlog::error("resize failed: {}", ret);
+		ret = -1;
+	} else {
+		ret = 0;
+	}
+
+/*
+	im_opt opt {};
+
+    opt.version = RGA_CURRENT_API_VERSION;
+    opt.interp = IM_INTERP(IM_INTERP_LINEAR, IM_INTERP_LINEAR);
+
+    ret = improcess(src_img, dst_img, {}, {}, {}, {}, 0, NULL, &opt, 0);
+	if (ret != IM_STATUS_SUCCESS) {
+		spdlog::error("resize failed: {}", ret);
+		ret = -1;
+	} else {
+		ret = 0;
+	}
+*/
+release_buffers:
+	if (src_handle) {
+		releasebuffer_handle(src_handle);
+	}
+
+	if (dst_handle) {
+		releasebuffer_handle(dst_handle);
+	}
+
+	end = get_cur_us();
+
+	spdlog::debug("RGA copy time: {} us", end - start);
+
+	return ret;
+}
+
+int blend_osd() {
+	int ret = 0;
+	int fg_width, fg_height, fg_format;
+	int bg_width, bg_height, bg_format;
+	int output_width, output_height, output_format;
+	void *fg_buf, *bg_buf, *output_buf;
+	int fg_buf_size, bg_buf_size, output_buf_size;
+	rga_buffer_t fg_img, bg_img, output_img;
+	im_rect fg_rect, bg_rect, output_rect;
+	rga_buffer_handle_t fg_handle, bg_handle, output_handle;
+	MppBufferInfo fg_info, bg_info, output_info;
+	int64_t start, end;
+	int usage = 0;
+
+	start = get_cur_us();
+
+	ret = mpp_buffer_info_get(encode.prev_buf, &fg_info);
+	if (ret) {
+		spdlog::error("get fg buf info failed");
+		return ret;
+	}
+
+	ret = mpp_buffer_info_get(encode.osd_buf, &bg_info);
+	if (ret) {
+		spdlog::error("get bg buf info failed");
+		return ret;
+	}
+
+	ret = mpp_buffer_info_get(encode.frm_buf[encode.frm_idx], &output_info);
+	if (ret) {
+		spdlog::error("get output buf info failed");
+		return ret;
+	}
+
+
+	fg_width = encode.frm_width;
+	fg_height = encode.frm_height;
+	fg_format = encode.frm_fmt == MPP_FMT_YUV420SP ? RK_FORMAT_YCrCb_420_SP : RK_FORMAT_YCrCb_420_SP_10B;
+
+	bg_width = encode.frm_width;
+	bg_height = encode.frm_height;
+	bg_format = RK_FORMAT_RGBA_8888;
+
+	output_width = fg_width;
+	output_height = fg_height;
+	output_format = fg_format;
+
+	fg_buf_size =fg_info.size;
+	bg_buf_size = bg_info.size;
+	output_buf_size = output_info.size;
+
+	fg_buf = fg_info.ptr;
+	bg_buf = bg_info.ptr;
+	output_buf = output_info.ptr;
+
+	fg_handle = importbuffer_fd(fg_info.fd, fg_buf_size);
+	bg_handle = importbuffer_fd(bg_info.fd, bg_buf_size);
+	output_handle = importbuffer_fd(output_info.fd, output_buf_size);
+	if (fg_handle == 0 || bg_handle == 0 || output_handle == 0) {
+		ret = -1;
+		spdlog::error("import buffer failed");
+		goto release_buffers;
+	}
+
+	fg_img = wrapbuffer_handle(fg_handle, fg_width, fg_height, fg_format);
+	bg_img = wrapbuffer_handle(bg_handle, bg_width, bg_height, bg_format);
+	output_img = wrapbuffer_handle(output_handle, output_width, output_height, output_format);
+
+	/*
+	* Configure the blended rectangular area here.
+	*      Here is intercepted from the foreground image (100, 200) as the starting point,
+	*  and a rectangle with the same resolution as the background image is blended with
+	*  the background image, and finally output to the output layer where (100, 200) is
+	*  the starting point.
+	*      fg_img => src_channel
+	*      bg_img => src1_channel
+	*      output_img => dst_channel
+		---------------------------        --------------      ---------------------------
+		|         fg_img          |        |   bg_img/  |      |       output_img        |
+		|     --------------      |        |   bg_rect  |      |     --------------      |
+		|     |            |      |        |            |      |     |            |      |
+		|     |   fg_rect  |      |    +   --------------  =>  |     | output_rect|      |
+		|     |            |      |                            |     |(bg over fg)|      |
+		|     --------------      |                            |     --------------      |
+		|                         |                            |                         |
+		---------------------------                            ---------------------------
+	*/
+
+	fg_rect.x = 0;
+	fg_rect.y = 0;
+	fg_rect.width = fg_width;
+	fg_rect.height = fg_height;
+
+	bg_rect.x = 0;
+	bg_rect.y = 0;
+	bg_rect.width = bg_width;
+	bg_rect.height = bg_height;
+
+	output_rect.x = 0;
+	output_rect.y = 0;
+	output_rect.width = output_width;
+	output_rect.height = output_height;
+
+	ret = imcheck_composite(fg_img, output_img, bg_img, fg_rect, output_rect, bg_rect);
+	if (IM_STATUS_NOERROR != ret) {
+		ret = -1;
+		spdlog::error("check failed");
+		goto release_buffers;
+	}
+
+	usage = IM_SYNC | IM_ALPHA_BLEND_DST_OVER | IM_ALPHA_BLEND_PRE_MUL;
+
+	ret = improcess(fg_img, output_img, bg_img, fg_rect, output_rect, bg_rect, -1, NULL, NULL, usage);
+	if (ret != IM_STATUS_SUCCESS) {
+		spdlog::error("blend failed");
+		ret = -1;
+	} else {
+		ret = 0;
+	}
+
+release_buffers:
+	if (fg_handle)
+		releasebuffer_handle(fg_handle);
+	if (bg_handle)
+		releasebuffer_handle(bg_handle);
+	if (output_handle)
+		releasebuffer_handle(output_handle);
+
+	end = get_cur_us();
+
+	spdlog::debug("RGA blend time: {} us", end - start);
+
+	return ret;
+}
+
+int convert_output() {
+	MppBufferInfo src_info, dst_info;
+	rga_buffer_t src_img, dst_img;
+	rga_buffer_handle_t src_handle, dst_handle;
+	int src_fmt, dst_fmt;
+	int64_t start, end;
+
+	start = get_cur_us();
+
+	MppBuffer src_buf = encode.frm_buf[encode.frm_idx];
+	MppBuffer dst_buf = encode.frm_buf[(encode.frm_idx + 1) % MAX_ENCODE_BUFS];
+
+	int ret = mpp_buffer_info_get(src_buf, &src_info);
+	if (ret) {
+		spdlog::error("get src buf info failed");
+		return ret;
+	}
+
+	ret = mpp_buffer_info_get(dst_buf, &dst_info);
+	if (ret) {
+		spdlog::error("get dst buf info failed");
+		return ret;
+	}
+
+	src_handle = importbuffer_fd(src_info.fd, src_info.size);
+	dst_handle = importbuffer_fd(dst_info.fd, dst_info.size);
+
+	if (!src_handle || !dst_handle) {
+		spdlog::error("import buffer failed");
+		ret = -1;
+		goto release_buffers;
+	}
+
+	src_fmt = encode.frm_fmt == MPP_FMT_YUV420SP ? RK_FORMAT_YCrCb_420_SP : RK_FORMAT_YCrCb_420_SP_10B;
+	dst_fmt = RK_FORMAT_RGBA_8888;
+
+	src_img = wrapbuffer_handle(src_handle, encode.frm_width, encode.frm_height, src_fmt);
+	dst_img = wrapbuffer_handle(dst_handle, encode.frm_width, encode.frm_height, dst_fmt);
+
+    ret = imcheck(src_img, dst_img, {}, {});
+    if (IM_STATUS_NOERROR != ret) {
+		spdlog::error("convert check failed");
+		ret = -1;
+		goto release_buffers;
+    }
+
+	ret = imcvtcolor(src_img, dst_img, src_fmt, dst_fmt);
+	if (ret != IM_STATUS_SUCCESS) {
+		spdlog::error("convert failed: {}", ret);
+		ret = -1;
+	} else {
+		ret = 0;
+	}
+
+release_buffers:
+	if (src_handle) {
+		releasebuffer_handle(src_handle);
+	}
+
+	if (dst_handle) {
+		releasebuffer_handle(dst_handle);
+	}
+
+	end = get_cur_us();
+
+	spdlog::debug("RGA convert time: {} us", end - start);
+
+	return ret;
 }
 
 
@@ -353,6 +716,8 @@ void *__DISPLAY_THREAD__(void *param)
 			if(enable_osd) {
 				ret = pthread_mutex_lock(&osd_mutex);
 				assert(!ret);
+				ret = copy_osd_buf();
+				assert(!ret);
 				ret = set_drm_object_property(output_list[i]->video_request, &output_list[i]->osd_plane, "FB_ID", osd_bufs.bufs[osd_bufs.buf_switch].fb);
 				assert(ret>0);
 				ret = pthread_mutex_unlock(&osd_mutex);
@@ -362,12 +727,122 @@ void *__DISPLAY_THREAD__(void *param)
 			drmModeAtomicCommit(drm_fd, output_list[i]->video_request, flags, NULL);
 		}
 
+		if (fb_id != 0 && encode.enable && encode.prev_buf != NULL) {
+			ret = pthread_mutex_lock(&encode_mutex);
+			assert(!ret);
+			ret = blend_osd();
+			assert(!ret);
+			encode.ready = true;
+			ret = pthread_cond_signal(&encode_cond);
+			assert(!ret);
+			ret = pthread_mutex_unlock(&encode_mutex);
+			assert(!ret);
+		}
+
 		osd_publish_uint_fact("video.displayed_frame", NULL, 0, 1);
 		uint64_t decode_and_handover_display_ms=get_time_ms()-decoding_pts;
 		osd_publish_uint_fact("video.decode_and_handover_ms", NULL, 0, decode_and_handover_display_ms);
 	}
 end:
 	spdlog::info("Display thread done.");
+	return nullptr;
+}
+
+
+void *__ENCODE_THREAD__(void *param)
+{
+	int ret;
+	static int frame_count = 0;
+
+	pthread_setname_np(pthread_self(), "__ENCODE");
+
+	while (!frm_eos) {
+		ret = pthread_mutex_lock(&encode_mutex);
+		assert(!ret);
+		while (encode.prev_buf == NULL || !encode.ready) {
+			pthread_cond_wait(&encode_cond, &encode_mutex);
+			assert(!ret);
+			if (frm_eos) {
+				ret = pthread_mutex_unlock(&encode_mutex);
+				assert(!ret);
+				goto end;
+			}
+		}
+
+		encode.ready = false;
+
+		ret = convert_output();
+		assert(!ret);
+
+		encode.frm_idx = (encode.frm_idx + 1) % MAX_ENCODE_BUFS;
+
+		if (frame_count % 100 == 0) {
+			MppBufferInfo buf_info;
+
+			ret = mpp_buffer_info_get(encode.frm_buf[encode.frm_idx], &buf_info);
+			assert(!ret);
+
+			char filename[64];
+			sprintf(filename, "./output_%03d.bmp", frame_count / 100);
+
+			ret = bmp_write(buf_info.ptr, filename, encode.frm_width, encode.frm_height);
+			assert(!ret);
+		}
+
+		frame_count++;
+
+		ret = pthread_mutex_unlock(&encode_mutex);
+		assert(!ret);
+
+		/*
+
+		MppBufferInfo src_info, dst_info;
+
+		ret = mpp_buffer_info_get(encode.prev_buf, &src_info);
+		assert(!ret);
+		ret = mpp_buffer_info_get(encode.frm_buf, &dst_info);
+		assert(!ret);
+
+		rga_buffer_handle_t src_handle = importbuffer_fd(src_info.fd, src_info.size);
+		rga_buffer_handle_t dst_handle = importbuffer_fd(dst_info.fd, dst_info.size);
+
+		assert(src_handle && dst_handle);
+
+		encode.prev_buf = NULL;
+
+		int src_fmt = encode.cur_fmt == MPP_FMT_YUV420SP ? RK_FORMAT_YCrCb_420_SP : RK_FORMAT_YCrCb_420_SP_10B;
+		int dst_fmt = RK_FORMAT_ARGB_8888;
+
+		rga_buffer_t src_img = wrapbuffer_handle(src_handle, encode.width, encode.height, src_fmt);
+ 		rga_buffer_t dst_img = wrapbuffer_handle(dst_handle, encode.width, encode.height, dst_fmt);
+
+		int64_t start = get_cur_us();
+
+		ret = imcvtcolor(src_img, dst_img, src_fmt, dst_fmt);
+		assert(ret == IM_STATUS_SUCCESS);
+
+		int64_t end = get_cur_us();
+
+		releasebuffer_handle(src_handle);
+		releasebuffer_handle(dst_handle);
+
+		ret = pthread_mutex_unlock(&encode_mutex);
+		assert(!ret);
+
+		static int write_count = 0;
+
+		if (write_count == 250) {
+			ret = bmp_write(dst_info.ptr, "output.bmp", encode.width, encode.height);
+			assert(!ret);
+		}
+
+		write_count++;
+
+		spdlog::info("Convert time: {} us, count {}", end - start, write_count);
+		*/
+	}
+end:
+	spdlog::info("Encode thread done.");
 	return nullptr;
 }
 
@@ -632,6 +1107,7 @@ int main(int argc, char **argv)
 	int video_framerate = -1;
 	int mp4_fragmentation_mode = 0;
 	bool dvr_filenames_with_sequence = false;
+	bool dvr_osd = false;
 	uint16_t wfb_port = 8003;
 	uint16_t mode_width = 0;
 	uint16_t mode_height = 0;
@@ -734,6 +1210,11 @@ int main(int argc, char **argv)
 
 	__OnArgument("--dvr-fmp4") {
 		mp4_fragmentation_mode = 1;
+		continue;
+	}
+
+	__OnArgument("--dvr-osd") {
+		dvr_osd = true;
 		continue;
 	}
 
@@ -885,6 +1366,11 @@ int main(int argc, char **argv)
 		}
 	}
 
+	if (dvr_osd && !enable_osd) {
+		fprintf(stderr, "--dvr-osd requires --osd\n");
+		return -1;
+	}
+
 	////////////////////////////////// MPI SETUP
 	MppPacket packet;
 
@@ -921,7 +1407,7 @@ int main(int argc, char **argv)
 	ret = pthread_cond_init(&video_cond, NULL);
 	assert(!ret);
 
-	pthread_t tid_frame, tid_display, tid_osd, tid_mavlink, tid_dvr, tid_wfbcli;
+	pthread_t tid_frame, tid_display, tid_encode, tid_osd, tid_mavlink, tid_dvr, tid_wfbcli;
 	if (dvr_template != NULL) {
 		dvr_thread_params args;
 		args.filename_template = dvr_template;
@@ -936,11 +1422,25 @@ int main(int argc, char **argv)
 		if (dvr_autostart) {
 			dvr->start_recording();
 		}
+
+		if (dvr_osd) {
+			encode.enable = true;
+		}
 	}
 	ret = pthread_create(&tid_frame, NULL, __FRAME_THREAD__, NULL);
 	assert(!ret);
 	ret = pthread_create(&tid_display, NULL, __DISPLAY_THREAD__, NULL);
 	assert(!ret);
+
+	if (encode.enable) {
+		ret = pthread_mutex_init(&encode_mutex, NULL);
+		assert(!ret);
+		ret = pthread_cond_init(&encode_cond, NULL);
+		assert(!ret);
+		ret = pthread_create(&tid_encode, NULL, __ENCODE_THREAD__, NULL);
+		assert(!ret);
+	}
+
 	if (enable_osd) {
 		nlohmann::json osd_config;
 		if(osd_config_path != "") {
@@ -997,6 +1497,16 @@ int main(int argc, char **argv)
 	ret = pthread_mutex_destroy(&video_mutex);
 	assert(!ret);
 
+	if (encode.enable) {
+		ret = pthread_join(tid_encode, NULL);
+		assert(!ret);
+
+		ret = pthread_cond_destroy(&encode_cond);
+		assert(!ret);
+		ret = pthread_mutex_destroy(&encode_mutex);
+		assert(!ret);
+	}
+
 	if (mavlink_thread) {
 		ret = pthread_join(tid_mavlink, NULL);
 		assert(!ret);
@@ -1032,6 +1542,16 @@ int main(int argc, char **argv)
 			} while (ret == -1 && (errno == EINTR || errno == EAGAIN));
 			assert(!ret);
 		}
+	}
+
+	if (encode.frm_grp) {
+		for (int i = 0; i < MAX_ENCODE_BUFS; i++) {
+			mpp_buffer_put(encode.frm_buf[i]);
+		}
+		mpp_buffer_put(encode.osd_buf);
+		ret = mpp_buffer_group_put(encode.frm_grp);
+		assert(!ret);
+		encode.frm_grp = NULL;
 	}
 
 	mpp_packet_deinit(&packet);

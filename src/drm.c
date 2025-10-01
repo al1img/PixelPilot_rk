@@ -399,7 +399,6 @@ err_destroy:
 	return ret;
 }
 
-
 void modeset_destroy_fb(int fd, struct modeset_buf *buf)
 {
 	struct drm_mode_destroy_dumb dreq;
