@@ -57,8 +57,6 @@ extern "C" {
 
 #include <im2d.h>
 #include <RgaUtils.h>
-#include "bmp/bmp.h"
-
 
 #define READ_BUF_SIZE (1024*1024) // SZ_1M https://github.com/rockchip-linux/mpp/blob/ed377c99a733e2cdbcc457a6aa3f0fcd438a9dff/osal/inc/mpp_common.h#L179
 #define MAX_FRAMES 24		// min 16 and 20+ recommended (mpp/readme.txt)
@@ -95,9 +93,13 @@ struct {
 	MppFrameFormat frm_fmt;
 	uint32_t frm_width;
 	uint32_t frm_height;
+	uint32_t hor_stride;
+	uint32_t ver_stride;
 	MppBuffer osd_buf;
 	MppBuffer cur_buf;
 	MppBuffer prev_buf;
+	MppCtx		  ctx;
+	MppApi		  *mpi;
 } encode;
 
 struct timespec frame_stats[1000];
@@ -131,6 +133,12 @@ modeset_bufs osd_bufs;
 // Add global variables for plane id overrides
 uint32_t video_plane_id_override = 0;
 uint32_t osd_plane_id_override = 0;
+
+int64_t get_cur_us() {
+    struct timeval tv;
+    gettimeofday(&tv,NULL);
+    return tv.tv_sec * 1000000 + tv.tv_usec;
+}
 
 void init_buffer(MppFrame frame) {
 	uint32_t frm_width = mpp_frame_get_width(frame);
@@ -200,7 +208,7 @@ void init_buffer(MppFrame frame) {
 		int ret = mpp_buffer_group_get_internal(&encode.frm_grp, MPP_BUFFER_TYPE_DRM);
 		assert(!ret);
 		for (int i = 0; i < MAX_ENCODE_BUFS; i++) {
-			ret = mpp_buffer_get(encode.frm_grp, &encode.frm_buf[i], CODEC_ALIGN(hor_stride, 64) * CODEC_ALIGN(ver_stride, 64) * 4);
+			ret = mpp_buffer_get(encode.frm_grp, &encode.frm_buf[i], CODEC_ALIGN(hor_stride, 64) * CODEC_ALIGN(ver_stride, 64) * 2);
 			assert(!ret);
 		}
 		ret = mpp_buffer_get(encode.frm_grp, &encode.osd_buf, CODEC_ALIGN(hor_stride, 64) * CODEC_ALIGN(ver_stride, 64) * 4);
@@ -209,6 +217,8 @@ void init_buffer(MppFrame frame) {
 		encode.frm_fmt = fmt;
 		encode.frm_width = frm_width;
 		encode.frm_height = frm_height;
+		encode.hor_stride = hor_stride;
+		encode.ver_stride = ver_stride;
 	}
 
 	// create new external frame group and allocate (commit flow) new DRM buffers and DRM FB
@@ -601,6 +611,8 @@ release_buffers:
 	return ret;
 }
 
+#if 0 // keep for debug purposes
+
 int convert_output() {
 	MppBufferInfo src_info, dst_info;
 	rga_buffer_t src_img, dst_img;
@@ -671,6 +683,7 @@ release_buffers:
 	return ret;
 }
 
+#endif
 
 void *__DISPLAY_THREAD__(void *param)
 {
@@ -771,29 +784,39 @@ void *__ENCODE_THREAD__(void *param)
 
 		encode.ready = false;
 
-		ret = convert_output();
+		int64_t start = get_cur_us();
+
+		MppFrame frame = NULL;
+
+		ret = mpp_frame_init(&frame);
 		assert(!ret);
 
+		mpp_frame_set_width(frame, encode.frm_width);
+		mpp_frame_set_height(frame, encode.frm_height);
+		mpp_frame_set_hor_stride(frame, encode.hor_stride);
+		mpp_frame_set_ver_stride(frame, encode.ver_stride);
+		mpp_frame_set_fmt(frame, encode.frm_fmt);
+		mpp_frame_set_buffer(frame, encode.frm_buf[encode.frm_idx]);
+
+		ret = encode.mpi->encode_put_frame(encode.ctx, frame);
+		assert(!ret);
+
+		mpp_frame_deinit(&frame);
+
 		encode.frm_idx = (encode.frm_idx + 1) % MAX_ENCODE_BUFS;
-
-		if (frame_count % 100 == 0) {
-			MppBufferInfo buf_info;
-
-			ret = mpp_buffer_info_get(encode.frm_buf[encode.frm_idx], &buf_info);
-			assert(!ret);
-
-			char filename[64];
-			sprintf(filename, "./output_%03d.bmp", frame_count / 100);
-
-			ret = bmp_write(buf_info.ptr, filename, encode.frm_width, encode.frm_height);
-			assert(!ret);
-		}
-
-		frame_count++;
 
 		ret = pthread_mutex_unlock(&encode_mutex);
 		assert(!ret);
 
+		MppPacket packet = NULL;
+
+		ret = encode.mpi->encode_get_packet(encode.ctx, &packet);
+		assert(!ret);
+		assert(packet);
+
+		int64_t end = get_cur_us();
+
+		spdlog::debug("Encode frame time: {} us", end - start);
 		/*
 
 		MppBufferInfo src_info, dst_info;
@@ -1033,6 +1056,19 @@ void set_mpp_decoding_parameters(MppApi * mpi,  MppCtx ctx) {
     int fast_mode = 0;
     set_control_verbose(mpi,ctx,MPP_DEC_SET_PARSER_FAST_MODE,fast_mode);
 }
+
+void set_mpp_encoding_parameters(MppApi* mpi,  MppCtx ctx) {
+    MppDecCfg cfg       = NULL;
+
+	mpp_enc_cfg_init(&cfg);
+    // get default config from encoder context
+    int ret = mpi->control(ctx, MPP_ENC_GET_CFG, cfg);
+    if (ret) {
+        spdlog::warn("{} failed to get encoder cfg ret {}", ctx, ret);
+        assert(false);
+    }
+}
+
 
 void printHelp() {
   printf(
@@ -1433,6 +1469,19 @@ int main(int argc, char **argv)
 	assert(!ret);
 
 	if (encode.enable) {
+		// Initialize encoder
+		ret = mpp_check_support_format(MPP_CTX_ENC, mpp_type);
+		assert(!ret);
+		ret = mpp_create(&encode.ctx, &encode.mpi);
+		assert(!ret);
+		ret = mpp_init(encode.ctx, MPP_CTX_ENC, mpp_type);
+		assert(!ret);
+		set_mpp_encoding_parameters(encode.mpi, encode.ctx);
+
+		MppPollType timeout = MPP_POLL_BLOCK;
+		ret = encode.mpi->control(encode.ctx, MPP_SET_OUTPUT_TIMEOUT, &timeout);
+		assert(!ret);
+		// Create encode thread
 		ret = pthread_mutex_init(&encode_mutex, NULL);
 		assert(!ret);
 		ret = pthread_cond_init(&encode_cond, NULL);
@@ -1552,6 +1601,13 @@ int main(int argc, char **argv)
 		ret = mpp_buffer_group_put(encode.frm_grp);
 		assert(!ret);
 		encode.frm_grp = NULL;
+	}
+
+	if (encode.enable) {
+		ret = encode.mpi->reset(encode.ctx);
+		assert(!ret);
+
+		mpp_destroy(encode.ctx);
 	}
 
 	mpp_packet_deinit(&packet);
