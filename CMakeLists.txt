@@ -130,9 +130,7 @@ set(SOURCE_FILES
         src/wfbcli.cpp
         src/scheduling_helper.hpp
         src/gstrtpreceiver.cpp
-        src/gstrtpreceiver.h
-        src/bmp/bmp.cpp
-        src/bmp/bmp.h)
+        src/gstrtpreceiver.h)
 file(GLOB ICONS src/icons/*.png)
 file(GLOB OSD_CONFIGS *_osd.json)
 
