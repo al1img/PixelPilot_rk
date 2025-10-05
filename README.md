@@ -31,6 +31,17 @@ sudo apt install libdrm-dev libcairo-dev librockchip-mpp-dev libspdlog-dev nlohm
 sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev
 ```
 
+## Build RGA library
+
+```
+git clone https://github.com/tsukumijima/librga-rockchip.git
+cd librga-rockchip
+mkdir build
+cd build
+cmake ../ -DRGA_SOURCE_CODE_TYPE=cpp -DCMAKE_BUILD_TYPE=Release -DCMAKE_BUILD_TARGET=buildroot
+make && make install
+```
+
 ## Build Instructions
 
 Build and run application in production environment:
@@ -249,6 +260,7 @@ display video on the screen, see `drm.c`.
 It uses `mavlink` decoder to read Mavlink telemetry from telemetry UDP (if enabled), see `mavlink.c`
 It uses `cairo` library to draw OSD elements (if enabled), see `osd.c`.
 It uses `lvgl`to draw the gsmenu.
+It used `librga` to blend and scale OSD with main stream.
 It writes non-decoded MPEG stream to file as DVR (if enabled) using `minimp4.h` library.
 
 Pixelpilot starts several threads:
