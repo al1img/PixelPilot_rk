@@ -450,11 +450,17 @@ struct modeset_output *modeset_output_create(int fd, drmModeRes *res, drmModeCon
 
 	int fc = 0;
 	int preferred_fc = -1;
+
+	printf("Connector %d: create output for connector\n", conn->connector_id);
+
+	for (int i = 0; i < conn->count_modes; i++ ) {
+		printf("%d: %dx%d@%d\n", i, conn->modes[i].hdisplay, conn->modes[i].vdisplay , conn->modes[i].vrefresh);
+	}
+
 	if (mode_width>0 && mode_height>0 && mode_vrefresh>0) {
 		fc = -1;
 		printf( "Available modes:\n");
 		for (int i = 0; i < conn->count_modes; i++ ) {
-			printf( "%d : %dx%d@%d\n",i, conn->modes[i].hdisplay, conn->modes[i].vdisplay , conn->modes[i].vrefresh );
 			if (conn->modes[i].hdisplay == mode_width &&
 			conn->modes[i].vdisplay == mode_height &&
 			conn->modes[i].vrefresh == mode_vrefresh
@@ -471,11 +477,11 @@ struct modeset_output *modeset_output_create(int fd, drmModeRes *res, drmModeCon
 			fprintf(stderr, "couldn't find a matching mode for %dx%d@%d\n", mode_width , mode_height , mode_vrefresh);
 			goto out_error;
 		} else if (fc < 0  && preferred_fc >= 0) {
-			fprintf(stderr, "couldn't find a matching mode, useing preferred mode %dx%d@%d\n", conn->modes[preferred_fc].hdisplay, conn->modes[preferred_fc].vdisplay , conn->modes[preferred_fc].vrefresh);
+			fprintf(stderr, "couldn't find a matching mode, using preferred mode %dx%d@%d\n", conn->modes[preferred_fc].hdisplay, conn->modes[preferred_fc].vdisplay , conn->modes[preferred_fc].vrefresh);
 			fc = preferred_fc;
 		}
-		printf( "Using screen mode %dx%d@%d\n",conn->modes[fc].hdisplay, conn->modes[fc].vdisplay , conn->modes[fc].vrefresh );
 	}
+	printf("Using screen mode %dx%d@%d\n", conn->modes[fc].hdisplay, conn->modes[fc].vdisplay , conn->modes[fc].vrefresh);
 	memcpy(&out->mode, &conn->modes[fc], sizeof(out->mode));
 	if (drmModeCreatePropertyBlob(fd, &out->mode, sizeof(out->mode), &out->mode_blob_id) != 0) {
 		fprintf(stderr, "couldn't create a blob property\n");
