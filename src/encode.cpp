@@ -62,6 +62,8 @@ void init_encode(Dvr *dvr, MppCodingType mpp_type, int frame_rate) {
 }
 
 void release_encode() {
+	spdlog::info("Release encode");
+
 	int ret = pthread_mutex_lock(&encode.mutex);
 	assert(!ret);
 	encode.close = true;
@@ -82,6 +84,8 @@ void release_encode() {
 	assert(!ret);
 
 	mpp_destroy(encode.ctx);
+
+	spdlog::info("Encode released");
 }
 
 void release_encode_buffers() {
@@ -170,7 +174,7 @@ int copy_osd_buf(const modeset_buf& osd_buf) {
 	}
 
 	src_img = wrapbuffer_handle(src_handle, osd_buf.width, osd_buf.height, fmt);
-	dst_img = wrapbuffer_handle(dst_handle, encode.frm_width, encode.frm_height, fmt);
+	dst_img = wrapbuffer_handle(dst_handle, encode.frm_width, encode.frm_height, fmt, encode.hor_stride, encode.ver_stride);
 
 	ret = imcheck(src_img, dst_img, {}, {});
 	if (IM_STATUS_NOERROR != ret) {
@@ -284,9 +288,9 @@ int blend_osd() {
 		goto release_buffers;
 	}
 
-	fg_img = wrapbuffer_handle(fg_handle, fg_width, fg_height, fg_format);
+	fg_img = wrapbuffer_handle(fg_handle, fg_width, fg_height, fg_format, encode.hor_stride, encode.ver_stride);
 	bg_img = wrapbuffer_handle(bg_handle, bg_width, bg_height, bg_format);
-	output_img = wrapbuffer_handle(output_handle, output_width, output_height, output_format);
+	output_img = wrapbuffer_handle(output_handle, output_width, output_height, output_format, encode.hor_stride, encode.ver_stride);
 
 	/*
 	* Configure the blended rectangular area here.
